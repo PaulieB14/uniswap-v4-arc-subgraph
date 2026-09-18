@@ -9,10 +9,10 @@ features:
 dataSources:
   - source:
       abi: PoolManager
-      address: "0x33620f62c5b9b2086dd6b62f4a297a9f30347029"
-      startBlock: 6606180
+      address: "0x8366a39cc670b4001a1121b8f6a443a643e40951"
+      startBlock: 1948011
     name: PoolManager
-    network: tempo
+    network: arc
     kind: ethereum/contract
     mapping:
       kind: ethereum/events
@@ -45,10 +45,10 @@ dataSources:
           handler: handleSwap
   - source:
       abi: PositionManager
-      address: "0x3fc79444f8eacc1894775493ff3fa41f1e35ce11"
-      startBlock: 6606180
+      address: "0x6049c9a0e26405c0985f9e3685c87d0ae917f82b"
+      startBlock: 1948011
     name: PositionManager
-    network: tempo
+    network: arc
     kind: ethereum/contract
     mapping:
       kind: ethereum/events
@@ -67,32 +67,3 @@ dataSources:
           handler: handleUnsubscription
         - event: Transfer(indexed address,indexed address,indexed uint256)
           handler: handleTransfer
-  - source:
-      abi: AggregatorHook
-      address: "0x7169a78a59f136876e724b648fbb339a42f46888"
-      startBlock: 6606180
-    name: AggregatorHook
-    network: tempo
-    kind: ethereum/contract
-    mapping:
-      kind: ethereum/events
-      apiVersion: 0.0.7
-      language: wasm/assemblyscript
-      file: ./src/mappings/poolManager.mapping.ts
-      entities:
-        - Pool
-        - Token
-      abis:
-        - name: ERC20
-          file: ./abis/ERC20.json
-        - name: ERC20SymbolBytes
-          file: ./abis/ERC20SymbolBytes.json
-        - name: ERC20NameBytes
-          file: ./abis/ERC20NameBytes.json
-        - name: PoolManager
-          file: ./abis/PoolManager.json
-        - name: AggregatorHook
-          file: ./abis/AggregatorHook.json
-      eventHandlers:
-        - event: HookSwap(indexed bytes32,indexed address,int256,int256,uint24)
-          handler: handleHookSwap

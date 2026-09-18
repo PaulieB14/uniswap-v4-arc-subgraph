@@ -33,6 +33,13 @@ const TEMPO_NETWORK_NAME = 'tempo'
 const ROBINHOOD_MAINNET_NETWORK_NAME = 'robinhood-mainnet'
 const INK_NETWORK_NAME = 'ink'
 const ARC_MAINNET_NETWORK_NAME = 'arc-mainnet'
+// The Graph's registrar knows Arc as 'arc'; 'arc-mainnet' is only a registry alias
+// and is rejected at deploy time. networks.json uses the alias, so the manifest can
+// arrive carrying either name and both have to resolve to this config — otherwise
+// getSubgraphConfig falls through to `throw new Error('Unsupported Network')` and
+// every handleInitialize fails, leaving a subgraph that indexes Transactions while
+// Pool, Token, Bundle and PoolManager stay permanently empty.
+const ARC_NETWORK_NAME = 'arc'
 
 // Note: All token and pool addresses should be lowercased!
 export class SubgraphConfig {
@@ -740,7 +747,7 @@ export function getSubgraphConfig(): SubgraphConfig {
         decimals: BigInt.fromI32(18),
       },
     }
-  } else if (selectedNetwork == ARC_MAINNET_NETWORK_NAME) {
+  } else if (selectedNetwork == ARC_MAINNET_NETWORK_NAME || selectedNetwork == ARC_NETWORK_NAME) {
     // Arc (chainId 5042) is Circle's USDC-native L1: the native gas token is USDC and there is no
     // wrapped native (the deployment's "WETH9" slot is the UnsupportedProtocol stub), so USDC is the
     // reference token. Reference == the dollar ⇒ native price is 1: stablecoinWrappedNativePoolId is
