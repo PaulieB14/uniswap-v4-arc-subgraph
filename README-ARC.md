@@ -103,6 +103,60 @@ npx graph build --network arc-mainnet   # networks.json key
 npx graph deploy uniswap-v4---arc
 ```
 
+## What this fork adds beyond the Arc deploy
+
+### A generic `Hook` entity
+
+v4 packs the 14 hook-permission flags into the **low 14 bits of the hook's own address** — a
+deployer mines a CREATE2 salt until the address carries the bits for the callbacks it implements
+(v4-core `Hooks.sol`). So a hook's whole capability set is derivable from the address: no ABI, no
+`eth_call`, no per-vendor data source, and it works on every network with no `networks.json` entry.
+
+```graphql
+{ hooks(first: 5, orderBy: txCount, orderDirection: desc) {
+    id poolCount txCount volumeUSD hasCustomAccounting
+    beforeSwap afterSwap beforeSwapReturnsDelta afterSwapReturnsDelta } }
+```
+
+`hasCustomAccounting` is the field to read before trusting a number. It is true when the hook holds
+any of the four `*ReturnsDelta` permissions, which let it change the amounts the PoolManager
+actually settles — so `volumeUSD` on those pools describes what the pool settled, not necessarily
+what the swapper traded. On Arc the busiest hook by transaction count holds both swap return-delta
+flags.
+
+Decoding is `((addr[18] << 8) | addr[19]) & 0x3fff` on the raw address bytes. Do **not** reach for
+`ByteArray.toU32()`/`toI32()`: both `assert(false)` on any nonzero byte past index 3 — which a
+20-byte address essentially always has, so the handler aborts — and both read little-endian.
+`BigInt.fromUnsignedBytes` has the same endianness trap.
+
+### Pricing fixes, all verified on Arc mainnet over RPC
+
+| Change | Why |
+|---|---|
+| **`address(0)` added to `whitelistTokens`** | In v4 the native currency is `address(0)`, and on Arc the native currency **is USDC** — so `address(0)` is a dollar. It was missing, and `getTrackedAmountUSD` gates on that list, so **every native-USDC pool reported `volumeUSD` = exactly 0**. Measured before the fix: `address(0)` carried 1,724,991 txs and $521,521 of tracked volume against `0x3600…`'s 4,624,259 txs and $411,575,238 — 37% of the transactions, 0.13% of the volume. Every other chain branch in `chains.ts` already whitelists its native; Arc was the outlier. |
+| **EURC address corrected** to `0xbef5f6d5…` | The address previously listed has **no contract** on Arc mainnet (`eth_getCode` → `0x`). It came from docs.arc.io, which is testnet-focused — Uniswap's own UniswapX Arc playbook warns about exactly this. |
+| **USYC removed** | Same: no code at the listed address, and no real USYC on Arc mainnet. |
+| **ARGUS and XAUM added** | Arc's two dominant launchpad quote assets, confirmed as `quoteAsset` on bonded launches in the Argus subgraph. Without them every ARGUS- or XAUM-quoted pool returned 0. |
+| **`Token.poolCount` now incremented** | Initialised to `ZERO_BI` upstream and never touched, so every token reported `poolCount: 0` — including USDC across 194k pools. |
+
+### Symbols are not identity on this chain
+
+Arc is a memecoin launchpad chain and impersonation is rife. Live counts from the deployment:
+**60+ tokens report symbol `EURC`** (real names include `ExtremelyUglyRichCat`), **19 report `USYC`**,
+and at least two report **`USDC` with 18 decimals** — their names are `UpSideDownCat` and
+`FatCatBatRatWifHat`. Two distinct contracts both call themselves `ARGUS` with identical name,
+symbol, decimals and supply; only `0xece5ca8b…` has a live market.
+
+Never extend a whitelist by symbol. Resolve the address, read `decimals()` on chain, and where a
+protocol names its own quote asset, take the protocol's word over the token's.
+
+### The two USDC entities
+
+`address(0)` (18 dec) and `0x3600…0000` (6 dec) are **the same asset at two precisions**, not a
+wrapper and its reserves — verified directly: one account shows `eth_getBalance` of
+`2000000000000000002` and `balanceOf` of `2000000`, exactly 1e12 apart. The subgraph keeps a `Token`
+row for each, so "USDC TVL on Arc" read from either address alone is a partial answer. Sum them.
+
 ## Not yet applied
 
 `Bytes` as entity IDs. All 19 entities still use `id: ID!`. Immutability is already correct

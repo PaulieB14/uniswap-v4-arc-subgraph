@@ -138,6 +138,9 @@ type Pool @entity(immutable: false) {
   poolDayData: [PoolDayData!]! @derivedFrom(field: "pool")
   # hooks address
   hooks: String!
+  # the same address as an entity, with its permissions decoded. Nullable on purpose:
+  # `features: [grafting]` is declared, and adding a NON-null field is not graft-compatible.
+  hook: Hook
   # derived fields
   modifyLiquiditys: [ModifyLiquidity!]! @derivedFrom(field: "pool")
   swaps: [Swap!]! @derivedFrom(field: "pool")
@@ -517,4 +520,59 @@ type ArrakisHook @entity(immutable: false) {
   createdAtTimestamp: BigInt!
   # block number of creation
   createdAtBlockNumber: BigInt!
+}
+
+"""
+A Uniswap v4 hook contract, keyed by its address.
+
+Every permission below is decoded from the address itself. v4 packs the 14 hook-permission
+flags into the LOW 14 BITS of the hook's address -- deployers mine a CREATE2 salt until the
+address carries the bits they want (v4-core `Hooks.sol`). So a hook's full capability set is
+knowable from the address alone: no ABI, no eth_call, no per-vendor data source.
+"""
+type Hook @entity(immutable: false) {
+  # hook contract address, lowercase hex. Joins directly against Pool.hooks.
+  id: ID!
+
+  # --- permissions, bit 13 down to bit 0 of the address ---
+  beforeInitialize: Boolean!
+  afterInitialize: Boolean!
+  beforeAddLiquidity: Boolean!
+  afterAddLiquidity: Boolean!
+  beforeRemoveLiquidity: Boolean!
+  afterRemoveLiquidity: Boolean!
+  beforeSwap: Boolean!
+  afterSwap: Boolean!
+  beforeDonate: Boolean!
+  afterDonate: Boolean!
+  beforeSwapReturnsDelta: Boolean!
+  afterSwapReturnsDelta: Boolean!
+  afterAddLiquidityReturnsDelta: Boolean!
+  afterRemoveLiquidityReturnsDelta: Boolean!
+
+  # the raw 14-bit flag word, for callers that would rather mask it themselves
+  permissions: Int!
+
+  """
+  True when ANY of the four *ReturnsDelta permissions is set.
+
+  Read this before trusting a number. A hook holding a return-delta permission can change the
+  amounts actually settled by the PoolManager, so `volumeUSD` / `totalValueLockedUSD` on its
+  pools describe what the pool settled, which is not necessarily what the swapper traded. This
+  is the single most important field here: on Arc the busiest hook by transaction count holds
+  both swap return-delta flags.
+  """
+  hasCustomAccounting: Boolean!
+
+  # --- aggregates across every pool using this hook ---
+  poolCount: BigInt!
+  txCount: BigInt!
+  volumeUSD: BigDecimal!
+  untrackedVolumeUSD: BigDecimal!
+  feesUSD: BigDecimal!
+  totalValueLockedUSD: BigDecimal!
+  createdAtTimestamp: BigInt!
+  createdAtBlockNumber: BigInt!
+
+  pools: [Pool!]! @derivedFrom(field: "hook")
 }

@@ -5,6 +5,7 @@ import { ModifyLiquidity as ModifyLiquidityEvent } from '../types/PoolManager/Po
 import { Bundle, ModifyLiquidity, Pool, PoolManager, Tick, Token } from '../types/schema'
 import { getSubgraphConfig, getUSDStableStableHookAddresses, SubgraphConfig } from '../utils/chains'
 import { ONE_BI } from '../utils/constants'
+import { Hook } from '../types/schema'
 import { convertTokenToDecimal, loadTransaction, safeDiv } from '../utils/index'
 import {
   updatePoolDayData,
@@ -72,6 +73,10 @@ export function handleModifyLiquidityHelper(
 
     // reset tvl aggregates until new amounts calculated
     poolManager.totalValueLockedETH = poolManager.totalValueLockedETH.minus(pool.totalValueLockedETH)
+    // Same subtract-then-re-add dance for the hook rollup: capture this pool's contribution
+    // BEFORE the handler recomputes it below, so the hook total moves by the delta rather than
+    // double-counting the pool's whole TVL on every liquidity event.
+    const poolTvlUSDBefore = pool.totalValueLockedUSD
 
     // update globals
     poolManager.txCount = poolManager.txCount.plus(ONE_BI)
@@ -128,6 +133,13 @@ export function handleModifyLiquidityHelper(
     // reset aggregates with new amounts
     poolManager.totalValueLockedETH = poolManager.totalValueLockedETH.plus(pool.totalValueLockedETH)
     poolManager.totalValueLockedUSD = poolManager.totalValueLockedETH.times(bundle.ethPriceUSD)
+
+    const hook = Hook.load(pool.hooks)
+    if (hook !== null) {
+      hook.totalValueLockedUSD = hook.totalValueLockedUSD.minus(poolTvlUSDBefore).plus(pool.totalValueLockedUSD)
+      hook.txCount = hook.txCount.plus(ONE_BI)
+      hook.save()
+    }
 
     const transaction = loadTransaction(event)
     const modifyLiquidity = new ModifyLiquidity(transaction.id.toString() + '-' + event.logIndex.toString())

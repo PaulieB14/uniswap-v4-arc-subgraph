@@ -752,19 +752,60 @@ export function getSubgraphConfig(): SubgraphConfig {
     // wrapped native (the deployment's "WETH9" slot is the UnsupportedProtocol stub), so USDC is the
     // reference token. Reference == the dollar ⇒ native price is 1: stablecoinWrappedNativePoolId is
     // '' (the sentinel handled in getNativePriceInUSD).
-    const USDC = '0x3600000000000000000000000000000000000000'.toLowerCase()
-    const EURC = '0x89b50855aa3be2f677cd6303cec089b5f319d72a'.toLowerCase()
-    const USYC = '0xe9185f0c5f296ed1797aae4238d26ccabeadb86c'.toLowerCase()
-    const CIRBTC = '0x171a4217b86a807a64eb94757db6849fb4bdbaa0'.toLowerCase() // BTC-pegged; whitelist only
-    const WETH = '0x128cc466b61f542da60c70e3aa11c10e19b84edb'.toLowerCase() // bridged ETH; whitelist only (not the native/reference)
+    // Every address below was read from Arc MAINNET over JSON-RPC on 2026-09-20, not taken from
+    // docs.arc.io. That matters: the docs are testnet-focused, and Uniswap's own UniswapX Arc
+    // playbook says so outright -- "confirm which other stables (EURC, USYC, etc.) are live on Arc
+    // mainnet ... docs list testnet assets only". Two of the addresses this file used to carry had
+    // NO CONTRACT AT ALL on mainnet (eth_getCode == '0x'), so they whitelisted nothing.
+    // v4's native-currency sentinel. On Arc this is USDC itself at 18-dec precision: the ERC-20
+    // at 0x3600...0000 is a 6-decimal VIEW over the same balance, not a wrapper holding reserves
+    // (verified on chain: eth_getBalance 2000000000000000002 vs balanceOf 2000000, exactly 1e12).
+    const NATIVE_USDC = '0x0000000000000000000000000000000000000000'
+    const USDC = '0x3600000000000000000000000000000000000000'.toLowerCase() // 6dp, verified
+    // Was 0x89b50855...d72a, which has no code on mainnet. The live EURC is 6dp with ~32k txs.
+    const EURC = '0xbef5f6d51cb62b58e6a8f77868681825c6fe21c1'.toLowerCase() // 6dp, verified
+    const CIRBTC = '0x171a4217b86a807a64eb94757db6849fb4bdbaa0'.toLowerCase() // 8dp, verified
+    const WETH = '0x128cc466b61f542da60c70e3aa11c10e19b84edb'.toLowerCase() // 18dp bridged ETH, verified
+    // Arc's two dominant launchpad quote assets. Both confirmed as `quoteAsset` on bonded launches
+    // in the Argus subgraph, which is the protocol's own word for what it prices against -- not a
+    // symbol match. Without these, every ARGUS- or XAUM-quoted pool returns volumeUSD = 0, because
+    // getTrackedAmountUSD returns ZERO_BD when NEITHER side is whitelisted.
+    const ARGUS = '0xece5ca8bf9220718e5727754026757512212cb3c'.toLowerCase() // 18dp, verified
+    const XAUM = '0x178b01f61cbea1d2a5581fe1621be607835ec349'.toLowerCase() // Matrixdock Gold, 18dp
+    // USYC removed: the address previously listed has no code on Arc mainnet, and every token on
+    // the chain answering to the symbol "USYC" is an 18-decimal impostor with <100 txs.
+    //
+    // SYMBOLS ARE NOT IDENTITY ON THIS CHAIN. Arc carries 60+ tokens reporting symbol "EURC"
+    // (names include "ExtremelyUglyRichCat"), 19 reporting "USYC", and at least two reporting
+    // "USDC" with 18 decimals whose real names are "UpSideDownCat" and "FatCatBatRatWifHat".
+    // Never extend this list by symbol; resolve the address and read decimals() on chain.
     return {
       poolManagerAddress: '0x8366a39cc670b4001a1121b8f6a443a643e40951'.toLowerCase(),
       stablecoinWrappedNativePoolId: '',
       stablecoinIsToken0: false,
       wrappedNativeAddress: USDC,
       minimumNativeLocked: BigDecimal.fromString('2000'),
-      stablecoinAddresses: [USDC],
-      whitelistTokens: [USDC, EURC, USYC, CIRBTC, WETH],
+      stablecoinAddresses: [USDC, EURC],
+      // ADDRESS_ZERO is the important one and it was missing. In v4 the native currency IS
+      // address(0), and on Arc the native currency is USDC -- so address(0) is a dollar, the
+      // single most important pricing anchor on this chain. pricing.ts:54 already short-circuits
+      // it to ONE_BD, but getTrackedAmountUSD (pricing.ts:125-140) gates on THIS list, and
+      // poolManager.ts:128-135 only fills a token's whitelistPools when the counterparty is on
+      // it. Omitting it meant every native-USDC pool reported volumeUSD = exactly 0 and every
+      // token that only ever traded against native USDC never derived a price at all.
+      //
+      // Measured on the live deployment before this fix: address(0) carried 1,724,991 txs and
+      // $521,521 of tracked volume, against 0x3600...0000's 4,624,259 txs and $411,575,238 --
+      // 37% of the transactions, 0.13% of the volume.
+      whitelistTokens: [
+        NATIVE_USDC, // address(0) -- see above. Every other chain branch whitelists its native.
+        USDC,
+        EURC,
+        CIRBTC,
+        WETH,
+        ARGUS,
+        XAUM,
+      ],
       tokenOverrides: [],
       poolsToSkip: [],
       poolMappings: [],

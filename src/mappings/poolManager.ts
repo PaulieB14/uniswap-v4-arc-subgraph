@@ -10,6 +10,7 @@ import {
   SubgraphConfig,
 } from '../utils/chains'
 import { ADDRESS_ZERO, ONE_BD, ONE_BI, ZERO_BD, ZERO_BI } from '../utils/constants'
+import { incrementHookPoolCount, loadOrCreateHook } from '../utils/hook'
 import { updatePoolDayData, updatePoolHourData } from '../utils/intervalUpdates'
 import { findNativePerToken, getNativePriceInUSD, sqrtPriceX96ToTokenPrices } from '../utils/pricing'
 import { fetchTokenDecimals, fetchTokenName, fetchTokenSymbol, fetchTokenTotalSupply } from '../utils/token'
@@ -123,6 +124,14 @@ export function handleInitializeHelper(
     token1.whitelistPools = []
   }
 
+  // Token.poolCount was initialised to ZERO_BI above and then never touched -- inherited from
+  // upstream Uniswap/v4-subgraph, where it is dead in exactly the same way. Every token on the
+  // live Arc deployment reports poolCount "0", including USDC with 4.6M transactions across
+  // 194k pools. It is a schema-visible field that is uniformly wrong, so maintain it here,
+  // which is the only place a Pool is ever created.
+  token0.poolCount = token0.poolCount.plus(ONE_BI)
+  token1.poolCount = token1.poolCount.plus(ONE_BI)
+
   // update white listed pools
   if (whitelistTokens.includes(token0.id)) {
     const newPools = token1.whitelistPools
@@ -139,6 +148,14 @@ export function handleInitializeHelper(
   pool.token1 = token1.id
   pool.feeTier = BigInt.fromI32(event.params.fee)
   pool.hooks = event.params.hooks.toHexString()
+  // Register the hook and decode its permissions from the address. This sits AFTER the
+  // poolsToSkip and null-decimals early returns above, so a Hook row is only ever created for
+  // a pool that actually gets persisted -- otherwise poolCount would drift above the number of
+  // pools that exist.
+  const hook = loadOrCreateHook(event.params.hooks, event)
+  incrementHookPoolCount(hook)
+  hook.save()
+  pool.hook = hook.id
   pool.tickSpacing = BigInt.fromI32(event.params.tickSpacing)
   pool.createdAtTimestamp = event.block.timestamp
   pool.createdAtBlockNumber = event.block.number

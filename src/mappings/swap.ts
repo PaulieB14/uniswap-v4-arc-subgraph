@@ -5,6 +5,7 @@ import { Swap as SwapEvent } from '../types/PoolManager/PoolManager'
 import { Bundle, Pool, PoolManager, Swap, Token } from '../types/schema'
 import { getSubgraphConfig, getUSDStableStableHookAddresses, SubgraphConfig } from '../utils/chains'
 import { ONE_BI, ZERO_BD } from '../utils/constants'
+import { Hook } from '../types/schema'
 import { convertTokenToDecimal, loadTransaction, safeDiv } from '../utils/index'
 import {
   updatePoolDayData,
@@ -235,6 +236,19 @@ export function handleSwapHelper(event: SwapEvent, subgraphConfig: SubgraphConfi
     pool.untrackedVolumeUSD = pool.untrackedVolumeUSD.plus(amountTotalUSDUntracked)
     pool.feesUSD = pool.feesUSD.plus(feesUSD)
     pool.txCount = pool.txCount.plus(ONE_BI)
+
+    // Roll the same swap up to the hook. Loaded rather than created: handleInitialize is the
+    // only place a Hook is minted, and a Swap cannot arrive for a pool that was never
+    // initialized. If it is somehow missing, skip the rollup rather than invent a row with
+    // permissions we never decoded.
+    const hook = Hook.load(pool.hooks)
+    if (hook !== null) {
+      hook.volumeUSD = hook.volumeUSD.plus(amountTotalUSDTracked)
+      hook.untrackedVolumeUSD = hook.untrackedVolumeUSD.plus(amountTotalUSDUntracked)
+      hook.feesUSD = hook.feesUSD.plus(feesUSD)
+      hook.txCount = hook.txCount.plus(ONE_BI)
+      hook.save()
+    }
 
     // Update the pool with the new active liquidity, price, and tick.
     pool.liquidity = event.params.liquidity
