@@ -227,6 +227,7 @@ export function handleSwapHelper(event: SwapEvent, subgraphConfig: SubgraphConfi
 
     // reset aggregate tvl before individual pool tvl updates
     const currentPoolTvlETH = pool.totalValueLockedETH
+    const poolTvlUSDBefore = pool.totalValueLockedUSD
     poolManager.totalValueLockedETH = poolManager.totalValueLockedETH.minus(currentPoolTvlETH)
 
     // pool volume
@@ -236,19 +237,6 @@ export function handleSwapHelper(event: SwapEvent, subgraphConfig: SubgraphConfi
     pool.untrackedVolumeUSD = pool.untrackedVolumeUSD.plus(amountTotalUSDUntracked)
     pool.feesUSD = pool.feesUSD.plus(feesUSD)
     pool.txCount = pool.txCount.plus(ONE_BI)
-
-    // Roll the same swap up to the hook. Loaded rather than created: handleInitialize is the
-    // only place a Hook is minted, and a Swap cannot arrive for a pool that was never
-    // initialized. If it is somehow missing, skip the rollup rather than invent a row with
-    // permissions we never decoded.
-    const hook = Hook.load(pool.hooks)
-    if (hook !== null) {
-      hook.volumeUSD = hook.volumeUSD.plus(amountTotalUSDTracked)
-      hook.untrackedVolumeUSD = hook.untrackedVolumeUSD.plus(amountTotalUSDUntracked)
-      hook.feesUSD = hook.feesUSD.plus(feesUSD)
-      hook.txCount = hook.txCount.plus(ONE_BI)
-      hook.save()
-    }
 
     // Update the pool with the new active liquidity, price, and tick.
     pool.liquidity = event.params.liquidity
@@ -315,6 +303,25 @@ export function handleSwapHelper(event: SwapEvent, subgraphConfig: SubgraphConfi
 
     poolManager.totalValueLockedETH = poolManager.totalValueLockedETH.plus(pool.totalValueLockedETH)
     poolManager.totalValueLockedUSD = poolManager.totalValueLockedETH.times(bundle.ethPriceUSD)
+
+    // Roll this swap up to the hook. This MUST sit after the pool's TVL is final: a swap moves
+    // pool TVL (both directly above and via the derivedETH re-pricing), so a hook rollup placed
+    // earlier would carry a stale TVL and drift every swap. Getting that wrong produced NEGATIVE
+    // Hook.totalValueLockedUSD -- the subtract in modifyLiquidity removed a `before` value that
+    // already contained swap movements the hook had never added.
+    //
+    // Loaded rather than created: handleInitialize is the only place a Hook is minted, and a Swap
+    // cannot arrive for a pool that was never initialized. If it is somehow absent, skip the
+    // rollup rather than invent a row with permissions we never decoded.
+    const hook = Hook.load(pool.hooks)
+    if (hook !== null) {
+      hook.volumeUSD = hook.volumeUSD.plus(amountTotalUSDTracked)
+      hook.untrackedVolumeUSD = hook.untrackedVolumeUSD.plus(amountTotalUSDUntracked)
+      hook.feesUSD = hook.feesUSD.plus(feesUSD)
+      hook.txCount = hook.txCount.plus(ONE_BI)
+      hook.totalValueLockedUSD = hook.totalValueLockedUSD.minus(poolTvlUSDBefore).plus(pool.totalValueLockedUSD)
+      hook.save()
+    }
 
     token0.totalValueLockedUSD = token0.totalValueLocked.times(token0.derivedETH).times(bundle.ethPriceUSD)
     token1.totalValueLockedUSD = token1.totalValueLocked.times(token1.derivedETH).times(bundle.ethPriceUSD)

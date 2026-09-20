@@ -305,6 +305,22 @@ Unit tests (`yarn test`) run under Docker via matchstick and are inherited from 
 is currently broken by an upstream dependency conflict (`@uniswap/eslint-config` against eslint
 8.57, `ERR_PACKAGE_PATH_NOT_EXPORTED`) — pre-existing, unrelated to this fork.
 
+### Invariant checks
+
+```bash
+python3 scripts/check-invariants.py [endpoint]
+```
+
+Checks properties of a **deployed** subgraph against its own indexed data — that every hook's
+permissions match its address, that `poolCount` matches the pools observed, that `Hook.volumeUSD`
+and `Hook.totalValueLockedUSD` equal the sums over their pools, that no hook holds negative TVL,
+and that native-USDC pools price at all.
+
+These exist because unit tests cannot catch aggregate drift. An accumulator maintained by delta is
+only wrong after thousands of interleaved events — which is exactly how `Hook.totalValueLockedUSD`
+shipped broken in v0.2.0, going *negative*, and was caught here rather than in review. Stdlib and
+curl only; exits non-zero on failure.
+
 ## Verifying a deployment
 
 Do this before believing any number:
