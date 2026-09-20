@@ -18,6 +18,18 @@ with a `Hook` entity that upstream does not have.
 
 ---
 
+## Contents
+
+- [The `Hook` entity](#the-hook-entity) — permissions decoded from the address
+  - [Permission flags](#permission-flags) · [Arc's hook landscape](#what-arcs-hook-landscape-actually-looks-like) · [Hook fields](#hook-fields)
+- [Indexing on Arc](#indexing-on-arc--what-the-chain-does-differently) — block time, finality, the decimals trap
+- [Worked example](#worked-example--launchpad-to-dex-in-one-join) — launchpad to DEX in one join
+- [What differs from upstream](#what-differs-from-upstream)
+- [Trap 1 — the network name](#trap-1--the-network-name) · [Trap 2 — AggregatorHook](#trap-2--removing-aggregatorhook)
+- [Why the pricing config looks unusual](#why-the-pricing-config-looks-unusual)
+- [The two USDC entities](#the-two-usdc-entities) · [Symbols are not identity](#symbols-are-not-identity-on-this-chain)
+- [Entities](#entities) · [Build and deploy](#build-and-deploy) · [Verifying a deployment](#verifying-a-deployment)
+
 ## The `Hook` entity
 
 V4 mines CREATE2 salts so a hook's **address carries its permissions in the low 14 bits**
@@ -47,14 +59,132 @@ For those pools `volumeUSD` describes what the pool settled, which is not necess
 swapper traded. On Arc that is not a corner case: hooks are near-universal — every top pool has one
 — and the busiest hook by transaction count holds both swap return-delta flags.
 
+### Permission flags
+
+Bit positions are from v4-core `Hooks.sol`. The word is the low 14 bits of the hook address, so
+`0x…2044` means bits 13, 6 and 2 are set.
+
+| Bit | Field | Bit | Field |
+|---:|---|---:|---|
+| 13 | `beforeInitialize` | 6 | `afterSwap` |
+| 12 | `afterInitialize` | 5 | `beforeDonate` |
+| 11 | `beforeAddLiquidity` | 4 | `afterDonate` |
+| 10 | `afterAddLiquidity` | 3 | `beforeSwapReturnsDelta` |
+| 9 | `beforeRemoveLiquidity` | 2 | `afterSwapReturnsDelta` |
+| 8 | `afterRemoveLiquidity` | 1 | `afterAddLiquidityReturnsDelta` |
+| 7 | `beforeSwap` | 0 | `afterRemoveLiquidityReturnsDelta` |
+
+`hasCustomAccounting` is `true` when any of bits 3–0 is set.
+
 Decoding is `((addr[18] << 8) | addr[19]) & 0x3fff` on the raw address bytes. Do **not** reach for
 `ByteArray.toU32()` / `toI32()`: both `assert(false)` on any nonzero byte past index 3 — which a
 20-byte address essentially always has, so the handler aborts — and both read little-endian.
 `BigInt.fromUnsignedBytes` carries the same endianness trap.
 
+### What Arc's hook landscape actually looks like
+
+Sampled from the live deployment, 1,000 busiest hooked pools (2026-09-20):
+
+| Flag word | Pools | Permissions |
+|---|---:|---|
+| `0x2044` | 766 | `beforeInitialize`, `afterSwap`, `afterSwapReturnsDelta` |
+| `0x20cc` | 65 | + `beforeSwap`, `beforeSwapReturnsDelta` |
+| `0x2acc` | 45 | + `beforeAddLiquidity`, `beforeRemoveLiquidity` |
+| `0x05c7` | 33 | `afterAddLiquidity`, `afterRemoveLiquidity`, `beforeSwap`, `afterSwap`, 3 return-deltas |
+| `0x00c4` | 17 | `beforeSwap`, `afterSwap`, `afterSwapReturnsDelta` |
+
+852 distinct hook addresses across those 1,000 pools — hooks are per-deployment here, not shared
+infrastructure. You can read the flag word straight off the address suffix: everything ending
+`…2044` is the same permission set.
+
+**98.6% of those pools — and 98.7% of their transactions — run under a hook that can alter the
+amounts settled.** On Arc `hasCustomAccounting` is not an edge case to filter out; it is the
+default, and the 1.4% without it are the exception. Treat Arc volume as *settled* amounts unless
+you have separately established what a given hook does.
+
+### Hook fields
+
+```
+id                   hook contract address, lowercase hex — joins Pool.hooks
+permissions          Int!  raw 14-bit flag word
+hasCustomAccounting  Boolean!  any *ReturnsDelta bit set
+<14 permission booleans, one per bit above>
+poolCount            BigInt!   pools initialized with this hook
+txCount              BigInt!   swaps + liquidity events across those pools
+volumeUSD            BigDecimal!   tracked volume
+untrackedVolumeUSD   BigDecimal!
+feesUSD              BigDecimal!
+totalValueLockedUSD  BigDecimal!   delta-maintained, not recomputed
+createdAtTimestamp / createdAtBlockNumber
+pools                [Pool!]!  @derivedFrom(field: "hook")
+```
+
+`Pool.hook` is nullable by design — `features: [grafting]` is declared and a non-null field
+addition is not graft-compatible. `Pool.hooks` (the plain address string) is retained, so existing
+queries keep working.
+
 This deliberately departs from the `EulerSwapHook` and `ArrakisHook` entities already in the
 schema. Those are vendor-specific, driven by factory events, and require an ABI plus a
 `networks.json` entry plus a data source — so they are dead on Arc, which has neither factory.
+
+## Indexing on Arc — what the chain does differently
+
+Facts that change how you consume this data, verified against
+[docs.arc.io](https://docs.arc.io/integrate/infrastructure/indexing-events) and Uniswap's
+[UniswapX Arc playbook](https://github.com/Uniswap/UniswapX/blob/main/playbook/chains/arc.md).
+
+| | |
+|---|---|
+| Chain id | `5042` (`0x13b2`); CAIP-2 `eip155:5042`; registry id **`arc`** |
+| Block time | ~500 ms, continuous production including empty blocks |
+| Finality | Malachite BFT, deterministic. One confirmation is final; **no reorgs** |
+| Gas token | **USDC**, not ETH. Constant basefee (20 gwei), so a 250k-gas call costs ~$0.005 |
+| Wrapped native | **None exists.** `sdk-core` correctly ships no `WETH9` entry for Arc |
+| Indexing rewards | `issuanceRewards: false` in the networks registry |
+
+**Order by block number and log index, never by timestamp.** Arc produces multiple blocks per
+second and consecutive blocks can carry an identical `timestamp`, so a timestamp sort is
+ambiguous. This subgraph's day/hour buckets are unaffected — integer division into 86400s/3600s
+windows is many-to-one by design, and two blocks sharing a timestamp correctly land in the same
+bucket — but your own queries should sort on `blockNumber` then `logIndex`.
+
+**The 6-vs-18 decimal trap is the single biggest integration risk on this chain.** Native USDC is
+18-decimal; the ERC-20 interface at `0x3600…0000` is 6-decimal over *the same balance*. Anything
+reading `eth_getBalance` gets 18-decimal units while every ERC-20 integration speaks 6. See
+[The two USDC entities](#the-two-usdc-entities).
+
+## Worked example — launchpad to DEX in one join
+
+Arc's launchpad traffic and its open-market traffic are separate subgraphs that join cleanly on
+the token address, and on `Pool.hooks` / `Launch.hook`. Pair this subgraph with
+[`argus`](https://thegraph.com/explorer/subgraphs/JBG4rStwjXA3XbD8K4NVJddcjPMGpNgsQPNm3KZdD2GW)
+to ask whether a graduated token still trades:
+
+```graphql
+# this subgraph — the open-market side
+{
+  token(id: "0x41358defd0dedc90528b3f1835715e907b686e6a") {
+    symbol volumeUSD txCount totalValueLockedUSD
+  }
+  pools(where: { token1: "0x41358defd0dedc90528b3f1835715e907b686e6a" }) {
+    volumeUSD txCount hook { id hasCustomAccounting }
+  }
+}
+```
+
+```graphql
+# argus — the launchpad side, same token id
+{
+  launch(id: "0x41358defd0dedc90528b3f1835715e907b686e6a") {
+    symbol bonded swapCount volumeQuote quoteSymbol holderCount hook
+  }
+}
+```
+
+Two cautions that bite here. `Launch.volumeQuote` is denominated in that launch's **quote asset**,
+which is USDC for most launches but ARGUS or XAUM for others — mixing them in one ranking is
+meaningless, so read `quoteSymbol` before comparing. And the `hook` field on both sides lets you
+confirm you are looking at the same pool, which matters on a chain where symbols collide.
 
 ## What differs from upstream
 
@@ -138,6 +268,25 @@ deployment on 2026-09-20:
 
 Never extend a whitelist by symbol. Resolve the address, read `decimals()` on chain, and where a
 protocol names its own quote asset, take the protocol's word over the token's.
+
+## Entities
+
+Inherited from upstream unless marked. Full definitions in
+[`schema.graphql`](schema.graphql).
+
+| Entity | What it holds |
+|---|---|
+| **`Hook`** | **New in this fork.** One row per hook address, permissions decoded, activity rolled up |
+| `PoolManager` | Chain-level totals — pool count, tx count, volume, TVL |
+| `Pool` | Per-pool state, volume, TVL, fee tier, tick spacing, `hooks` + `hook` |
+| `Token` | Per-token metadata, volume, TVL, `derivedETH`, `whitelistPools`, `poolCount` |
+| `Bundle` | `ethPriceUSD` — pinned to `1` on Arc, since the native currency is a dollar |
+| `Swap`, `ModifyLiquidity` | Immutable event rows |
+| `Tick`, `Position` | Tick-level liquidity and LP positions |
+| `Transaction` | One row per transaction containing indexed events |
+| `UniswapDayData`, `PoolDayData`, `PoolHourData`, `TokenDayData`, `TokenHourData` | Time buckets |
+| `Subscribe`, `Unsubscribe`, `Transfer` | PositionManager events |
+| `EulerSwapHook`, `ArrakisHook` | Vendor-specific, factory-driven — **never written on Arc** |
 
 ## Build and deploy
 
